@@ -31,16 +31,22 @@ const MT_URL = process.env.QWEN_MT_URL || 'https://maas.qianwenaiapi.com/compati
 // ---- 流式翻译：POST /api/translate { text, target, source? } ----
 // 返回 NDJSON，每行 {"t": "目前为止的完整译文"}，结束时 {"done": true}
 async function handleTranslate(req, res) {
-  let body = '';
-  for await (const chunk of req) body += chunk;
   const json = (code, obj) => {
     res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(obj));
   };
   const ac = new AbortController();
   res.on('close', () => ac.abort()); // 浏览器取消（文字又变了）时，同时取消上游请求
+  let input;
   try {
-    const { text, target, source = 'auto', terms } = JSON.parse(body || '{}');
+    let body = '';
+    for await (const chunk of req.setEncoding('utf8')) body += chunk;
+    input = JSON.parse(body);
+  } catch (e) {
+    return json(400, { error: '请求体无效：' + e.message }); // 浏览器中途断开时也会走到这里
+  }
+  try {
+    const { text, target, source = 'auto', terms } = input ?? {};
     if (!text || !target) return json(400, { error: '缺少 text 或 target' });
     const translation_options = { source_lang: source, target_lang: target };
     if (Array.isArray(terms) && terms.length) translation_options.terms = terms;
@@ -152,6 +158,7 @@ wss.on('connection', (client, req) => {
     if (upstream.readyState === WebSocket.OPEN) upstream.send(text);
     else if (upstream.readyState === WebSocket.CONNECTING) pending.push(text);
   });
+  client.on('error', (e) => console.error('[client] error', e.message)); // ws 随后会触发 close
   client.on('close', () => {
     if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING) upstream.close();
   });

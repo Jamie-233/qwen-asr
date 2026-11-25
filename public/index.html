@@ -292,10 +292,20 @@ const $ = (id) => document.getElementById(id);
 const ICON_MIC = '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>';
 const ICON_STOP = '<rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor"/>';
 
-let ws, audioCtx, stream, node, source;
-let recording = false, startAt = 0, timerId = null;
-let segments = [];            // { t: 秒, text }
-let interimEl = null, segStart = 0;
+// 一次录音 = 一个会话。所有回调只操作自己的会话，所以旧会话收尾时不会影响新会话。
+// phase: connecting → recording → finishing → closed
+function newSession() {
+  return {
+    phase: 'connecting', live: isLive(), srcType: $('source').value, target: $('ltTarget').value, vad: $('vad').checked,
+    ws: null, audioCtx: null, stream: null, node: null, source: null, playCtx: null, playAt: 0,
+    startAt: 0, timerId: null,
+    cur: null,                // 正在说的这一句
+    segById: {}, trToSrc: {}, // 同传：item → 句子
+  };
+}
+let session = null;           // 最近一次录音，只有它能改状态栏和按钮
+let segments = [];            // 已定稿的句子
+const isRecording = () => session?.phase === 'recording';
 let levels = new Array(64).fill(0);
 
 // ---------- UI 辅助 ----------
@@ -305,52 +315,49 @@ function toast(msg, isErr) {
   clearTimeout(t._h); t._h = setTimeout(() => (t.className = 'toast'), 3000);
 }
 const fmt = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
-const elapsed = () => (recording ? (performance.now() - startAt) / 1000 : 0);
+const elapsed = (s) => (s.phase === 'recording' ? (performance.now() - s.startAt) / 1000 : 0);
 const uid = () => 'event_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
-const send = (obj) => ws && ws.readyState === 1 && ws.send(JSON.stringify({ event_id: uid(), ...obj }));
+const send = (s, obj) => s.ws?.readyState === 1 && s.ws.send(JSON.stringify({ event_id: uid(), ...obj }));
 
 function updateMeta() {
   const chars = segments.reduce((n, s) => n + s.text.replace(/\s/g, '').length, 0);
   $('meta').textContent = `${segments.length} 句 · ${chars} 字`;
-  $('empty').style.display = segments.length || interimEl ? 'none' : '';
+  $('empty').style.display = document.querySelector('.seg') ? 'none' : '';
 }
 function scrollBottom() { const b = $('tbody'); b.scrollTop = b.scrollHeight; }
 
-let cur = null; // 正在说的这一句
-
-function newSeg() {
-  const t = elapsed();
+function newSeg(s) {
+  const t = elapsed(s);
   const el = document.createElement('div');
   el.className = 'seg interim';
   el.innerHTML = `<time>${fmt(t)}</time><div class="body"><p></p></div>`;
   $('tbody').appendChild(el);
-  return { el, t, text: '', final: false, tr: '', busy: false, ctrl: null };
+  return { el, t, session: s, text: '', final: false, tr: '', busy: false, ctrl: null };
 }
 
-function showInterim(text, stash = '') {
-  if (!interimEl) { cur = newSeg(); interimEl = cur.el; segStart = cur.t; }
-  const p = interimEl.querySelector('p');
+function showInterim(s, text, stash = '') {
+  const seg = (s.cur ??= newSeg(s));
+  const p = seg.el.querySelector('p');
   p.textContent = text;
-  if (stash) { const s = document.createElement('span'); s.className = 'stash'; s.textContent = stash; p.appendChild(s); }
+  if (stash) { const e = document.createElement('span'); e.className = 'stash'; e.textContent = stash; p.appendChild(e); }
   p.insertAdjacentHTML('beforeend', '<span class="caret"></span>');
-  cur.text = text + stash;
-  if (!isLive()) requestTranslate(cur); // 边说边翻
+  seg.text = text + stash;
+  if (!s.live) requestTranslate(seg); // 边说边翻
   updateMeta(); scrollBottom();
 }
-function finalize(text, lang) {
+function finalize(s, text, lang) {
   text = (text || '').trim();
-  if (!interimEl && !text) return;
-  if (!interimEl) showInterim('');
-  const seg = cur;
-  if (!text) { seg.ctrl?.abort(); interimEl.remove(); interimEl = null; cur = null; updateMeta(); return; }
-  interimEl.className = 'seg';
+  if (!s.cur && !text) return;
+  const seg = s.cur ?? newSeg(s);
+  s.cur = null;
+  if (!text) { clearTimeout(seg.timer); seg.ctrl?.abort(); seg.el.remove(); updateMeta(); return; }
+  seg.el.className = 'seg';
   seg.final = true; seg.text = text; seg.lang = lang || detectLang(text);
-  const p = interimEl.querySelector('p');
+  const p = seg.el.querySelector('p');
   p.textContent = text;
   p.insertAdjacentHTML('afterbegin', `<span class="lang-tag">${labelOf(seg.lang)}</span>`);
   segments.push(seg);
-  interimEl = null; cur = null;
-  if (!isLive()) requestTranslate(seg, true);
+  if (!s.live) requestTranslate(seg, true);
   updateMeta(); scrollBottom();
 }
 
@@ -484,28 +491,25 @@ async function runTranslate(seg, to, attempt = 0) {
 }
 
 // ---------- 同声传译 ----------
-let segById = {}, trToSrc = {};
-let playCtx = null, playAt = 0;
-
 // 原文 item → 对应的这一行
-function liveSeg(itemId) {
-  if (segById[itemId]) return segById[itemId];
-  if (cur && !cur.itemId) { cur.itemId = itemId; return (segById[itemId] = cur); }
-  if (cur) finalize(cur.text); // 上一句没收到定稿就开始了新一句
-  cur = newSeg(); interimEl = cur.el; segStart = cur.t; cur.itemId = itemId;
+function liveSeg(s, itemId) {
+  if (s.segById[itemId]) return s.segById[itemId];
+  if (s.cur && !s.cur.itemId) { s.cur.itemId = itemId; return (s.segById[itemId] = s.cur); }
+  if (s.cur) finalize(s, s.cur.text); // 上一句没收到定稿就开始了新一句
+  s.cur = newSeg(s); s.cur.itemId = itemId;
   updateMeta();
-  return (segById[itemId] = cur);
+  return (s.segById[itemId] = s.cur);
 }
 // 译文 item → 对应原文那一行（找不到时挂到最近一句还没译完的）
-function liveTrSeg(itemId) {
-  if (trToSrc[itemId]) return trToSrc[itemId];
-  const pending = segments.find((s) => s.itemId && !s.trDone) || cur;
-  if (pending) trToSrc[itemId] = pending;
+function liveTrSeg(s, itemId) {
+  if (s.trToSrc[itemId]) return s.trToSrc[itemId];
+  const pending = segments.find((g) => g.session === s && g.itemId && !g.trDone) || s.cur;
+  if (pending) s.trToSrc[itemId] = pending;
   return pending;
 }
 function setLiveTr(seg, text, stash, done) {
   if (!seg) return;
-  const box = trBox(seg, $('ltTarget').value);
+  const box = trBox(seg, seg.session.target);
   const txt = box.querySelector('.txt');
   txt.textContent = text || '';
   if (stash) { const s = document.createElement('span'); s.className = 'stash'; s.textContent = stash; txt.appendChild(s); }
@@ -514,8 +518,9 @@ function setLiveTr(seg, text, stash, done) {
   if (done) seg.trDone = true;
   scrollBottom();
 }
-function playPcm24k(b64) {
-  if (!playCtx) return;
+function playPcm24k(s, b64) {
+  const { playCtx } = s;
+  if (!playCtx || playCtx.state === 'closed') return;
   const bin = atob(b64), n = bin.length >> 1, f = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     let v = bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8);
@@ -526,8 +531,8 @@ function playPcm24k(b64) {
   buf.copyToChannel(f, 0);
   const src = playCtx.createBufferSource();
   src.buffer = buf; src.connect(playCtx.destination);
-  playAt = Math.max(playAt, playCtx.currentTime + 0.05);
-  src.start(playAt); playAt += buf.duration;
+  s.playAt = Math.max(s.playAt, playCtx.currentTime + 0.05);
+  src.start(s.playAt); s.playAt += buf.duration;
 }
 function liveHotwords(text) {
   const phrases = {};
@@ -579,7 +584,7 @@ function drawWave() {
   const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
   const n = levels.length, bw = w / n;
   const grad = g.createLinearGradient(0, 0, w, 0); grad.addColorStop(0, '#5b4bdb'); grad.addColorStop(1, '#c04bd6');
-  g.fillStyle = recording ? grad : '#d9d5cc';
+  g.fillStyle = isRecording() ? grad : '#d9d5cc';
   for (let i = 0; i < n; i++) {
     const v = Math.min(1, levels[i] * 6);
     const bh = Math.max(3, v * h);
@@ -591,169 +596,187 @@ function drawWave() {
 requestAnimationFrame(drawWave);
 
 // ---------- 处理服务端事件 ----------
-function onServerEvent(ev) {
+function onServerEvent(s, ev) {
+  const status = (...a) => s === session && s.phase !== 'closed' && setStatus(...a);
+  const hint = (text) => s === session && s.phase === 'recording' && s.srcType !== 'file' && ($('hintText').textContent = text);
   switch (ev.type) {
-    case 'proxy.connected': setStatus('connecting', '正在初始化…'); break;
+    case 'proxy.connected': status('connecting', '正在初始化…'); break;
     case 'session.created':
-    case 'session.updated': setStatus('live', '识别中'); break;
-    case 'input_audio_buffer.speech_started': setStatus('speaking', '检测到说话'); if ($('source').value !== 'file') $('hintText').textContent = '正在聆听…'; break;
-    case 'input_audio_buffer.speech_stopped': setStatus('live', '识别中'); $('hintText').textContent = '处理中…'; break;
+    case 'session.updated': status('live', '识别中'); break;
+    case 'input_audio_buffer.speech_started': status('speaking', '检测到说话'); hint('正在聆听…'); break;
+    case 'input_audio_buffer.speech_stopped': status('live', '识别中'); hint('处理中…'); break;
     // 中间结果：text 为已确定部分，stash 为暂定部分
     case 'conversation.item.input_audio_transcription.text':
-      if (isLive() && ev.item_id) { if (liveSeg(ev.item_id) !== cur) break; }
-      showInterim(ev.text || '', ev.stash || ''); break;
+      if (s.live && ev.item_id && liveSeg(s, ev.item_id) !== s.cur) break;
+      showInterim(s, ev.text || '', ev.stash || ''); break;
     case 'conversation.item.input_audio_transcription.delta':
-      showInterim(((interimEl && interimEl.querySelector('p').textContent) || '') + (ev.delta || '')); break;
+      showInterim(s, (s.cur?.text || '') + (ev.delta || '')); break;
     // 最终结果
     case 'conversation.item.input_audio_transcription.completed':
-      if (isLive() && ev.item_id && liveSeg(ev.item_id) !== cur) break;
-      finalize(ev.transcript ?? ev.text, ev.language); if (recording && $('source').value !== 'file') $('hintText').textContent = '正在聆听…'; break;
+      if (s.live && ev.item_id && liveSeg(s, ev.item_id) !== s.cur) break;
+      finalize(s, ev.transcript ?? ev.text, ev.language); hint('正在聆听…'); break;
     // ---- 同传 ----
     case 'conversation.item.created':
-      if (ev.previous_item_id && segById[ev.previous_item_id] && ev.item?.id) trToSrc[ev.item.id] = segById[ev.previous_item_id];
+      if (ev.previous_item_id && s.segById[ev.previous_item_id] && ev.item?.id) s.trToSrc[ev.item.id] = s.segById[ev.previous_item_id];
       break;
     case 'response.audio_transcript.text':
     case 'response.text.text':
-      setLiveTr(liveTrSeg(ev.item_id), ev.text, ev.stash, false); break;
+      setLiveTr(liveTrSeg(s, ev.item_id), ev.text, ev.stash, false); break;
     case 'response.audio_transcript.delta':
     case 'response.text.delta': {
-      const sg = liveTrSeg(ev.item_id); setLiveTr(sg, (sg?.tr || '') + (ev.delta || ''), '', false); break;
+      const seg = liveTrSeg(s, ev.item_id); setLiveTr(seg, (seg?.tr || '') + (ev.delta || ''), '', false); break;
     }
     case 'response.audio_transcript.done':
     case 'response.text.done':
-      setLiveTr(liveTrSeg(ev.item_id), ev.transcript ?? ev.text ?? '', '', true); break;
+      setLiveTr(liveTrSeg(s, ev.item_id), ev.transcript ?? ev.text ?? '', '', true); break;
     case 'response.audio.delta':
-      if (ev.delta) playPcm24k(ev.delta); break;
+      if (ev.delta) playPcm24k(s, ev.delta); break;
     case 'response.created': case 'response.done': case 'response.output_item.added': case 'response.output_item.done':
     case 'response.content_part.added': case 'response.content_part.done': case 'response.audio.done':
     case 'input_audio_buffer.committed':
       break;
     case 'conversation.item.input_audio_transcription.failed':
-      toast('该句识别失败：' + (ev.error?.message || ''), true); finalize(''); break;
-    case 'session.finished': ws && ws.close(); break;
+      toast('该句识别失败：' + (ev.error?.message || ''), true); finalize(s, ''); break;
+    case 'session.finished': s.ws.close(); break;
     case 'error':
-      console.error(ev); toast(ev.error?.message || '服务出错', true); setStatus('error', '出错'); break;
+      console.error(ev); toast(ev.error?.message || '服务出错', true); status('error', '出错'); break;
     default: console.debug('[event]', ev.type, ev);
   }
 }
 
 // ---------- 开始 / 停止 ----------
+const SOURCE_NAME = { mic: '麦克风', system: '电脑声音', file: '音频文件' };
+
 async function start() {
+  session?.playCtx?.close();
+  const s = (session = newSession());
   $('micBtn').disabled = true;
   setStatus('connecting', '连接中…');
-  const srcType = $('source').value;
-  let fileBuf = null, fileName = '';
+  let file = null;
   try {
-    if (srcType === 'file') {
-      const file = await pickFile(); // 必须在点击事件里同步弹出文件选择框
-      if (!file) { $('micBtn').disabled = false; setStatus('', '未连接'); return; }
-      fileName = file.name;
-      fileBuf = await file.arrayBuffer();
-    } else if (srcType === 'system') {
-      stream = await navigator.mediaDevices.getDisplayMedia({
+    if (s.srcType === 'file') {
+      file = await pickFile(); // 必须在点击事件里同步弹出文件选择框
+      if (!file) return closeSession(s);
+    } else if (s.srcType === 'system') {
+      s.stream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
         audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
         systemAudio: 'include',
         selfBrowserSurface: 'exclude',
       });
-      if (!stream.getAudioTracks().length) {
-        stream.getTracks().forEach((t) => t.stop()); stream = null;
+      if (!s.stream.getAudioTracks().length)
         throw new Error('没有共享到声音：请在弹窗里选择「标签页」，并打开「同时分享标签页中的音频」');
-      }
       // 在浏览器顶部点「停止共享」时，自动结束
-      stream.getAudioTracks()[0].addEventListener('ended', () => recording && stop());
+      s.stream.getAudioTracks()[0].addEventListener('ended', () => stop(s));
     } else {
-      stream = await navigator.mediaDevices.getUserMedia({
+      s.stream = await navigator.mediaDevices.getUserMedia({
         audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
     }
   } catch (e) {
-    const name = { mic: '麦克风', system: '电脑声音', file: '音频文件' }[srcType];
-    toast(`无法使用${name}：` + e.message, true); setStatus('error', name + '不可用'); $('micBtn').disabled = false; return;
+    const name = SOURCE_NAME[s.srcType];
+    return fail(s, `无法使用${name}：` + e.message, name + '不可用');
   }
 
   // 先解码文件，格式不支持时尽早报错
-  audioCtx = new AudioContext();
+  s.audioCtx = new AudioContext();
   let fileAudio = null;
-  if (fileBuf) {
-    try { fileAudio = await audioCtx.decodeAudioData(fileBuf); }
-    catch { toast('无法解码这个文件，请换成 mp3 / wav / m4a 等常见格式', true); stopAudio(); setStatus('error', '文件无法解码'); $('micBtn').disabled = false; return; }
+  if (file) {
+    try { fileAudio = await s.audioCtx.decodeAudioData(await file.arrayBuffer()); }
+    catch { return fail(s, '无法解码这个文件，请换成 mp3 / wav / m4a 等常见格式', '文件无法解码'); }
   }
 
-  const live = isLive();
-  const model = live ? 'qwen3.5-livetranslate-flash-realtime' : 'qwen3-asr-flash-realtime';
-  segById = {}; trToSrc = {};
-  if (live && $('ltAudio').checked) {
-    try { playCtx && playCtx.close(); } catch {}
-    playCtx = new AudioContext({ sampleRate: 24000 }); playAt = 0; playCtx.resume();
-  } else playCtx = null;
-  ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?model=${model}`);
-  ws.onmessage = (m) => { try { onServerEvent(JSON.parse(m.data)); } catch (e) { console.warn(m.data); } };
-  ws.onclose = () => { if (recording) { toast('连接已断开', true); stopAudio(); } if (!$('status').classList.contains('error')) setStatus('', '未连接'); };
-  ws.onerror = () => { setStatus('error', '连接失败'); };
-  await new Promise((res, rej) => { ws.onopen = res; setTimeout(() => rej(new Error('连接超时')), 8000); })
-    .catch((e) => { toast(e.message, true); });
-  if (ws.readyState !== 1) { stopAudio(); $('micBtn').disabled = false; return; }
-
-  const lang = $('lang').value, vad = $('vad').checked, corpus = $('corpus').value.trim();
-  const turn_detection = vad ? { type: 'server_vad', threshold: 0.2, silence_duration_ms: Number($('silence').value) } : null;
-  if (live) {
-    const transcription = { model: 'qwen3-asr-flash-realtime' };
-    if (lang !== 'auto') transcription.language = lang;
-    const translation = { language: $('ltTarget').value };
-    const hot = corpus && liveHotwords(corpus);
-    if (hot) translation.corpus = hot;
-    send({
-      type: 'session.update',
-      session: {
-        modalities: $('ltAudio').checked ? ['text', 'audio'] : ['text'],
-        voice: 'Tina',
-        input_audio_format: 'pcm',
-        output_audio_format: 'pcm',
-        sample_rate: 16000,
-        input_audio_transcription: transcription,
-        translation,
-        turn_detection,
-      },
-    });
-  } else {
-    const transcription = {};
-    if (lang !== 'auto') transcription.language = lang;
-    if (corpus) transcription.corpus = { text: corpus };
-    send({
-      type: 'session.update',
-      session: {
-        modalities: ['text'],
-        input_audio_format: 'pcm',
-        sample_rate: 16000,
-        input_audio_transcription: transcription,
-        turn_detection,
-      },
-    });
+  if (s.live && $('ltAudio').checked) {
+    s.playCtx = new AudioContext({ sampleRate: 24000 }); s.playCtx.resume();
   }
+  try {
+    await connect(s);
+    send(s, { type: 'session.update', session: sessionConfig(s) });
+    await s.audioCtx?.audioWorklet.addModule('pcm-worklet.js');
+  } catch (e) { return fail(s, e.message, '连接失败'); }
+  if (s.phase === 'closed') return; // 准备期间连接断了，onclose 已经收拾好
 
-  await audioCtx.audioWorklet.addModule('pcm-worklet.js');
-  node = new AudioWorkletNode(audioCtx, 'pcm-worklet');
+  s.node = new AudioWorkletNode(s.audioCtx, 'pcm-worklet');
   if (fileAudio) {
     // 本地文件：一边播放给你听，一边按实际速度送去识别；播完自动结束
-    source = audioCtx.createBufferSource();
-    source.buffer = fileAudio;
-    source.connect(audioCtx.destination);
-    source.onended = () => setTimeout(() => recording && stop(), 1200);
-    source.start();
+    s.source = s.audioCtx.createBufferSource();
+    s.source.buffer = fileAudio;
+    s.source.connect(s.audioCtx.destination);
+    s.source.onended = () => setTimeout(() => stop(s), 1200);
+    s.source.start();
   } else {
-    source = audioCtx.createMediaStreamSource(stream);
+    s.source = s.audioCtx.createMediaStreamSource(s.stream);
   }
-  node.port.onmessage = ({ data }) => {
+  s.node.port.onmessage = ({ data }) => {
+    if (s.phase !== 'recording') return;
     if (data.level !== undefined) { levels.push(data.level); levels.shift(); }
-    if (data.pcm) send({ type: 'input_audio_buffer.append', audio: toBase64(data.pcm) });
+    if (data.pcm) send(s, { type: 'input_audio_buffer.append', audio: toBase64(data.pcm) });
   };
-  source.connect(node);
+  s.source.connect(s.node);
 
-  recording = true; startAt = performance.now();
-  timerId = setInterval(() => ($('timer').textContent = fmt(elapsed())), 250);
+  s.phase = 'recording'; s.startAt = performance.now();
+  s.timerId = setInterval(() => ($('timer').textContent = fmt(elapsed(s))), 250);
   $('micBtn').classList.add('recording'); $('micIcon').innerHTML = ICON_STOP; $('micBtn').disabled = false;
-  $('hintText').textContent = fileName ? `正在识别：${fileName}（${fmt(fileAudio.duration)}）` : '正在聆听…';
+  $('hintText').textContent = file ? `正在识别：${file.name}（${fmt(fileAudio.duration)}）` : '正在聆听…';
+}
+
+function connect(s) {
+  const model = s.live ? 'qwen3.5-livetranslate-flash-realtime' : 'qwen3-asr-flash-realtime';
+  s.ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?model=${model}`);
+  s.ws.onmessage = (m) => {
+    let ev;
+    try { ev = JSON.parse(m.data); } catch { return console.warn('[event] 不是 JSON', m.data); }
+    onServerEvent(s, ev);
+  };
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('连接超时')), 8000);
+    s.ws.onopen = () => { clearTimeout(timer); resolve(); };
+    s.ws.onclose = () => {
+      clearTimeout(timer); reject(new Error('无法连接到本地服务'));
+      if (s.phase === 'recording') toast('连接已断开', true);
+      closeSession(s);
+    };
+  });
+}
+
+function sessionConfig(s) {
+  const lang = $('lang').value, corpus = $('corpus').value.trim();
+  const transcription = lang === 'auto' ? {} : { language: lang };
+  const config = {
+    modalities: ['text'],
+    input_audio_format: 'pcm',
+    sample_rate: 16000,
+    input_audio_transcription: transcription,
+    turn_detection: s.vad ? { type: 'server_vad', threshold: 0.2, silence_duration_ms: Number($('silence').value) } : null,
+  };
+  if (!s.live) {
+    if (corpus) transcription.corpus = { text: corpus };
+    return config;
+  }
+  transcription.model = 'qwen3-asr-flash-realtime';
+  const translation = { language: s.target };
+  const hot = corpus && liveHotwords(corpus);
+  if (hot) translation.corpus = hot;
+  return { ...config, modalities: s.playCtx ? ['text', 'audio'] : ['text'], voice: 'Tina', output_audio_format: 'pcm', translation };
+}
+
+function fail(s, message, statusText) {
+  if (s.phase === 'closed') return;
+  toast(message, true); setStatus('error', statusText);
+  closeSession(s);
+}
+
+// 会话的唯一终点，可以重复调用
+function closeSession(s) {
+  if (s.phase === 'closed') return;
+  stopAudio(s);
+  s.phase = 'closed';
+  s.ws?.close();
+  if (s.cur) finalize(s, s.cur.text);
+  if (s !== session) return;
+  $('micBtn').disabled = false;
+  $('hintText').textContent = '准备就绪';
+  if (!$('status').classList.contains('error')) setStatus('', '未连接');
 }
 
 function pickFile() {
@@ -766,29 +789,25 @@ function pickFile() {
   });
 }
 
-function stopAudio() {
-  recording = false; clearInterval(timerId);
-  try { source && source.onended !== undefined && (source.onended = null); source && source.stop && source.stop(); } catch {}
-  try { source && source.disconnect(); node && node.disconnect(); } catch {}
-  audioCtx && audioCtx.close(); audioCtx = null;
-  stream && stream.getTracks().forEach((t) => t.stop()); stream = null;
+function stopAudio(s) {
+  clearInterval(s.timerId);
+  if (s.source) { s.source.onended = null; s.source.stop?.(); s.source.disconnect(); }
+  s.node?.disconnect();
+  s.audioCtx?.close(); s.audioCtx = null;
+  s.stream?.getTracks().forEach((t) => t.stop());
+  if (s !== session) return;
   levels.fill(0);
   $('micBtn').classList.remove('recording'); $('micIcon').innerHTML = ICON_MIC;
-  $('hintText').textContent = '准备就绪';
 }
 
-function stop() {
-  stopAudio();
-  if (ws && ws.readyState === 1) {
-    if (!$('vad').checked) send({ type: 'input_audio_buffer.commit' });
-    send({ type: 'session.finish' });
-    $('hintText').textContent = '收尾中…';
-    const s = ws; setTimeout(() => { s.readyState === 1 && s.close(); finalizeLeftover(); }, 4000);
-  }
-}
-function finalizeLeftover() {
-  if (interimEl) { const t = interimEl.querySelector('p').textContent; finalize(t); }
-  $('hintText').textContent = '准备就绪';
+function stop(s) {
+  if (s.phase !== 'recording') return;
+  stopAudio(s);
+  s.phase = 'finishing';
+  $('hintText').textContent = '收尾中…';
+  if (!s.vad) send(s, { type: 'input_audio_buffer.commit' });
+  send(s, { type: 'session.finish' });
+  setTimeout(() => closeSession(s), 4000); // 正常情况下 session.finished 会更早关闭连接
 }
 
 function toBase64(buf) {
@@ -798,7 +817,7 @@ function toBase64(buf) {
 }
 
 // ---------- 事件绑定 ----------
-$('micBtn').onclick = () => (recording ? stop() : start());
+$('micBtn').onclick = () => (isRecording() ? stop(session) : start());
 document.addEventListener('keydown', (e) => {
   if (e.code === 'Space' && !['TEXTAREA', 'SELECT', 'INPUT'].includes(document.activeElement.tagName)) { e.preventDefault(); $('micBtn').click(); }
 });
@@ -807,7 +826,7 @@ $('toggleCorpus').onclick = () => {
   $('toggleCorpus').textContent = box.classList.contains('open') ? '－ 收起上下文' : '＋ 专业词汇 / 上下文';
 };
 $('vad').onchange = () => ($('silence').disabled = !$('vad').checked);
-$('engine').addEventListener('change', () => { applyEngineUI(); if (recording) toast('模型切换在下次开始录音时生效'); });
+$('engine').addEventListener('change', () => { applyEngineUI(); if (isRecording()) toast('模型切换在下次开始录音时生效'); });
 for (const id of PREF_FIELDS) $(id).addEventListener('change', savePrefs);
 $('trans').addEventListener('change', () => toast('翻译设置已保存，对之后的句子生效'));
 const segText = (s) => s.text + (s.tr ? `\n  → ${s.tr}` : '');
