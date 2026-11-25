@@ -2,8 +2,8 @@
 
 ## 运行
 ```bash
-npm install
-npm start
+pnpm install
+pnpm start
 ```
 浏览器打开 http://localhost:3000 ，点麦克风（或按空格）开始/停止。
 
