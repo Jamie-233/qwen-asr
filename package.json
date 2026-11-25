@@ -1,0 +1,16 @@
+{
+  "name": "qwen-asr-realtime",
+  "version": "1.0.0",
+  "description": "Qwen3-ASR-Flash-Realtime 实时语音识别",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "ws": "^8.23.0"
+  }
+}

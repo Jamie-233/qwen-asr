@@ -1,0 +1,831 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>实时语音识别 · Qwen3-ASR</title>
+<style>
+  :root {
+    --bg: #f5f3ee;
+    --card: #ffffff;
+    --ink: #1d1b22;
+    --muted: #8a8693;
+    --line: #e8e4dc;
+    --accent: #5b4bdb;
+    --accent-2: #c04bd6;
+    --ok: #1f9d6b;
+    --err: #d64545;
+    --radius: 20px;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: "Inter", "PingFang SC", "Hiragino Sans", "Microsoft YaHei", system-ui, sans-serif;
+    background:
+      radial-gradient(900px 500px at 85% -10%, #e7e2ff 0%, transparent 60%),
+      radial-gradient(700px 400px at -10% 110%, #fde7f3 0%, transparent 60%),
+      var(--bg);
+    color: var(--ink);
+    display: flex; justify-content: center;
+    padding: 32px 20px;
+  }
+  .app { width: 100%; max-width: 880px; display: flex; flex-direction: column; gap: 18px; height: calc(100vh - 64px); }
+
+  header { display: flex; align-items: center; justify-content: space-between; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .logo {
+    width: 40px; height: 40px; border-radius: 12px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    display: grid; place-items: center; color: #fff; box-shadow: 0 6px 18px rgba(91,75,219,.3);
+  }
+  .brand h1 { font-size: 18px; margin: 0; letter-spacing: .2px; }
+  .brand p { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
+
+  .status {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 7px 14px; border-radius: 999px; font-size: 13px;
+    background: var(--card); border: 1px solid var(--line);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #bbb; }
+  .status.connecting .dot { background: #e0a100; animation: blink 1s infinite; }
+  .status.live .dot { background: var(--ok); box-shadow: 0 0 0 4px rgba(31,157,107,.15); }
+  .status.speaking .dot { background: var(--accent-2); box-shadow: 0 0 0 4px rgba(192,75,214,.18); }
+  .status.error .dot { background: var(--err); }
+  @keyframes blink { 50% { opacity: .3; } }
+
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+    box-shadow: 0 1px 0 rgba(0,0,0,.02), 0 20px 50px -30px rgba(40,30,90,.25);
+  }
+
+  .settings { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; padding: 14px 18px; }
+  .field { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+  select, textarea {
+    font: inherit; color: var(--ink); background: #faf9f6;
+    border: 1px solid var(--line); border-radius: 10px; padding: 7px 10px; outline: none;
+  }
+  select:focus, textarea:focus { border-color: var(--accent); }
+  .switch { position: relative; width: 38px; height: 22px; }
+  .switch input { display: none; }
+  .switch span { position: absolute; inset: 0; background: #d9d5cc; border-radius: 99px; cursor: pointer; transition: .2s; }
+  .switch span::after { content: ""; position: absolute; width: 16px; height: 16px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: .2s; box-shadow: 0 1px 3px rgba(0,0,0,.2); }
+  .switch input:checked + span { background: var(--accent); }
+  .switch input:checked + span::after { transform: translateX(16px); }
+  .linkbtn { background: none; border: none; color: var(--accent); font: inherit; font-size: 13px; cursor: pointer; padding: 0; margin-left: auto; }
+  .corpus { width: 100%; display: none; }
+  .corpus.open { display: block; }
+  .corpus textarea { width: 100%; min-height: 64px; resize: vertical; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+  .transcript { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .t-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+  .t-head h2 { font-size: 14px; margin: 0; font-weight: 600; }
+  .t-head .meta { font-size: 12px; color: var(--muted); margin-left: 8px; font-weight: 400; }
+  .tools { display: flex; gap: 6px; }
+  .icon-btn {
+    display: inline-flex; align-items: center; gap: 6px; font: inherit; font-size: 12px;
+    border: 1px solid var(--line); background: #fff; color: var(--ink); padding: 6px 10px; border-radius: 9px; cursor: pointer;
+    transition: .15s;
+  }
+  .icon-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .icon-btn svg { width: 14px; height: 14px; }
+
+  .t-body { flex: 1; overflow-y: auto; padding: 18px 22px 24px; scroll-behavior: smooth; }
+  .empty { height: 100%; display: grid; place-items: center; text-align: center; color: var(--muted); font-size: 14px; }
+  .empty b { display: block; color: var(--ink); font-size: 16px; margin-bottom: 6px; font-weight: 600; }
+  .seg { display: grid; grid-template-columns: 56px 1fr; gap: 12px; padding: 10px 0; border-bottom: 1px dashed var(--line); animation: rise .25s ease; }
+  .seg:last-child { border-bottom: none; }
+  .seg time { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; padding-top: 3px; }
+  .seg p { margin: 0; font-size: 16px; line-height: 1.75; }
+  .seg.interim p { color: var(--muted); }
+  .seg.interim p .stash { color: #b8b3c2; }
+  .seg .body { min-width: 0; }
+  .seg.interim .tr { opacity: .75; }
+  .seg .tr {
+    margin-top: 6px; padding: 6px 12px; border-left: 3px solid var(--accent);
+    background: linear-gradient(90deg, #f3f0ff, transparent); border-radius: 0 8px 8px 0;
+    font-size: 15px; line-height: 1.7; color: #3d3570;
+  }
+  .seg .tr .tag { font-size: 11px; color: var(--accent); margin-right: 8px; font-weight: 600; letter-spacing: .3px; }
+  .seg .tr.pending .txt { display: inline-block; width: 140px; height: 12px; border-radius: 6px; vertical-align: middle;
+    background: linear-gradient(90deg, #e6e1fb 25%, #f4f2fd 50%, #e6e1fb 75%); background-size: 200% 100%; animation: shimmer 1.2s infinite; }
+  .seg .tr.failed { border-left-color: var(--err); color: var(--err); background: #fff5f5; cursor: pointer; }
+  @keyframes shimmer { to { background-position: -200% 0; } }
+  .lang-tag { display: inline-block; font-size: 10px; padding: 1px 6px; margin-right: 6px; border-radius: 5px; background: #f0eee8; color: var(--muted); vertical-align: 2px; }
+  .divider { width: 1px; height: 22px; background: var(--line); }
+  .field.lt { display: none; }
+  .live .field.lt { display: flex; }
+  .live .field.trans { display: none; }
+  .field.trans select, .field.lt select { border-color: #d8d2fb; background: #f7f5ff; color: var(--accent); font-weight: 500; }
+  .caret { display: inline-block; width: 2px; height: 1em; background: var(--accent); vertical-align: -2px; margin-left: 2px; animation: blink 1s infinite; }
+  @keyframes rise { from { opacity: 0; transform: translateY(4px); } }
+
+  .controls { display: flex; align-items: center; gap: 22px; padding: 16px 22px; }
+  .mic-wrap { position: relative; width: 72px; height: 72px; flex: none; }
+  .ring { position: absolute; inset: 0; border-radius: 50%; background: linear-gradient(135deg, var(--accent), var(--accent-2)); opacity: .18; transform: scale(1); transition: transform .08s linear; }
+  .mic {
+    position: absolute; inset: 6px; border-radius: 50%; border: none; cursor: pointer;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff;
+    display: grid; place-items: center; box-shadow: 0 10px 24px -8px rgba(91,75,219,.6); transition: transform .15s;
+  }
+  .mic:hover { transform: scale(1.04); }
+  .mic:active { transform: scale(.97); }
+  .mic svg { width: 26px; height: 26px; }
+  .mic.recording { background: var(--ink); box-shadow: 0 10px 24px -8px rgba(0,0,0,.5); }
+  .mic:disabled { opacity: .6; cursor: wait; }
+  .wave { flex: 1; height: 48px; }
+  .timer { font-variant-numeric: tabular-nums; font-size: 22px; font-weight: 500; min-width: 72px; text-align: right; }
+  .timer small { display: block; font-size: 11px; color: var(--muted); font-weight: 400; }
+
+  .toast {
+    position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 20px); opacity: 0;
+    background: var(--ink); color: #fff; padding: 10px 16px; border-radius: 12px; font-size: 13px;
+    transition: .25s; pointer-events: none; max-width: 90vw;
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .toast.err { background: var(--err); }
+
+  @media (max-width: 600px) {
+    body { padding: 16px 12px; }
+    .app { height: calc(100vh - 32px); }
+    .brand p, .t-head .meta { display: none; }
+    .tools .label { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand">
+      <div class="logo">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 10v4M8 6v12M12 3v18M16 7v10M20 10v4"/></svg>
+      </div>
+      <div>
+        <h1>实时语音识别</h1>
+        <p>Qwen3-ASR-Flash-Realtime</p>
+      </div>
+    </div>
+    <div id="status" class="status"><span class="dot"></span><span id="statusText">未连接</span></div>
+  </header>
+
+  <section class="card settings">
+    <label class="field">模型
+      <select id="engine">
+        <option value="asr">识别 + 文本翻译（Qwen3-ASR + Qwen-MT）</option>
+        <option value="live">同声传译（Qwen3.5-LiveTranslate）</option>
+      </select>
+    </label>
+    <span class="divider"></span>
+    <label class="field">音源
+      <select id="source">
+        <option value="mic">🎙 麦克风</option>
+        <option value="system">🖥 电脑声音（标签页 / 屏幕）</option>
+        <option value="file">📁 本地音频文件</option>
+      </select>
+    </label>
+    <input type="file" id="fileInput" accept="audio/*,video/*" hidden />
+    <label class="field">语言
+      <select id="lang">
+        <option value="auto" selected>自动 / 混合语音</option>
+        <option value="zh">中文</option>
+        <option value="en">English</option>
+        <option value="ja">日本語</option>
+        <option value="ko">한국어</option>
+        <option value="yue">粤语</option>
+        <option value="fr">Français</option>
+        <option value="de">Deutsch</option>
+        <option value="es">Español</option>
+        <option value="ru">Русский</option>
+      </select>
+    </label>
+    <label class="field">自动断句 (VAD)
+      <span class="switch"><input id="vad" type="checkbox" checked /><span></span></label>
+    </label>
+    <label class="field">静音判定
+      <select id="silence">
+        <option value="500">0.5 秒</option>
+        <option value="800" selected>0.8 秒</option>
+        <option value="1200">1.2 秒</option>
+        <option value="2000">2 秒</option>
+      </select>
+    </label>
+    <span class="divider"></span>
+    <label class="field lt">译成
+      <select id="ltTarget">
+        <option value="zh">中文</option>
+        <option value="ja">日本語</option>
+        <option value="en">English</option>
+        <option value="ko">한국어</option>
+        <option value="yue">粤语（仅文字）</option>
+        <option value="fr">Français</option>
+        <option value="de">Deutsch</option>
+        <option value="es">Español</option>
+        <option value="ru">Русский</option>
+      </select>
+    </label>
+    <label class="field lt">朗读译文
+      <span class="switch"><input id="ltAudio" type="checkbox" /><span></span></span>
+    </label>
+    <label class="field trans">翻译
+      <select id="trans">
+        <option value="off">不翻译</option>
+        <optgroup label="双向互译（自动判断说的是哪种）">
+          <option value="zh<>ja">中 ⇄ 日</option>
+          <option value="zh<>en">中 ⇄ 英</option>
+          <option value="ja<>en">日 ⇄ 英</option>
+        </optgroup>
+        <optgroup label="单向">
+          <option value="ja>zh">日 → 中</option>
+          <option value="zh>ja">中 → 日</option>
+          <option value="en>zh">英 → 中</option>
+          <option value="zh>en">中 → 英</option>
+        </optgroup>
+        <optgroup label="全部译成">
+          <option value="*>zh">任意 → 中文</option>
+          <option value="*>ja">任意 → 日文</option>
+          <option value="*>en">任意 → 英文</option>
+        </optgroup>
+      </select>
+    </label>
+    <button class="linkbtn" id="toggleCorpus">＋ 专业词汇 / 上下文</button>
+    <div class="corpus" id="corpusBox">
+      <textarea id="corpus" placeholder="可选：输入领域相关的词汇或背景文本，例如人名、产品名、专业术语，有助于提升识别准确率"></textarea>
+      <div class="hint" id="corpusHint">设置在下次开始录音时生效</div>
+    </div>
+  </section>
+
+  <section class="card transcript">
+    <div class="t-head">
+      <h2>识别结果<span class="meta" id="meta">0 句 · 0 字</span></h2>
+      <div class="tools">
+        <button class="icon-btn" id="copyBtn" title="复制全部">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span class="label">复制</span>
+        </button>
+        <button class="icon-btn" id="dlBtn" title="导出 TXT">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 19h16"/></svg><span class="label">导出</span>
+        </button>
+        <button class="icon-btn" id="clearBtn" title="清空">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg><span class="label">清空</span>
+        </button>
+      </div>
+    </div>
+    <div class="t-body" id="tbody">
+      <div class="empty" id="empty"><div><b>点击下方按钮开始</b>可以识别麦克风、电脑正在播放的声音，或本地音频文件</div></div>
+    </div>
+  </section>
+
+  <section class="card controls">
+    <div class="mic-wrap">
+      <div class="ring" id="ring"></div>
+      <button class="mic" id="micBtn" aria-label="开始/停止">
+        <svg id="micIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+      </button>
+    </div>
+    <canvas class="wave" id="wave"></canvas>
+    <div class="timer"><span id="timer">00:00</span><small id="hintText">准备就绪</small></div>
+  </section>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const ICON_MIC = '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>';
+const ICON_STOP = '<rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor"/>';
+
+let ws, audioCtx, stream, node, source;
+let recording = false, startAt = 0, timerId = null;
+let segments = [];            // { t: 秒, text }
+let interimEl = null, segStart = 0;
+let levels = new Array(64).fill(0);
+
+// ---------- UI 辅助 ----------
+function setStatus(cls, text) { $('status').className = 'status ' + cls; $('statusText').textContent = text; }
+function toast(msg, isErr) {
+  const t = $('toast'); t.textContent = msg; t.className = 'toast show' + (isErr ? ' err' : '');
+  clearTimeout(t._h); t._h = setTimeout(() => (t.className = 'toast'), 3000);
+}
+const fmt = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+const elapsed = () => (recording ? (performance.now() - startAt) / 1000 : 0);
+const uid = () => 'event_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+const send = (obj) => ws && ws.readyState === 1 && ws.send(JSON.stringify({ event_id: uid(), ...obj }));
+
+function updateMeta() {
+  const chars = segments.reduce((n, s) => n + s.text.replace(/\s/g, '').length, 0);
+  $('meta').textContent = `${segments.length} 句 · ${chars} 字`;
+  $('empty').style.display = segments.length || interimEl ? 'none' : '';
+}
+function scrollBottom() { const b = $('tbody'); b.scrollTop = b.scrollHeight; }
+
+let cur = null; // 正在说的这一句
+
+function newSeg() {
+  const t = elapsed();
+  const el = document.createElement('div');
+  el.className = 'seg interim';
+  el.innerHTML = `<time>${fmt(t)}</time><div class="body"><p></p></div>`;
+  $('tbody').appendChild(el);
+  return { el, t, text: '', final: false, tr: '', busy: false, ctrl: null };
+}
+
+function showInterim(text, stash = '') {
+  if (!interimEl) { cur = newSeg(); interimEl = cur.el; segStart = cur.t; }
+  const p = interimEl.querySelector('p');
+  p.textContent = text;
+  if (stash) { const s = document.createElement('span'); s.className = 'stash'; s.textContent = stash; p.appendChild(s); }
+  p.insertAdjacentHTML('beforeend', '<span class="caret"></span>');
+  cur.text = text + stash;
+  if (!isLive()) requestTranslate(cur); // 边说边翻
+  updateMeta(); scrollBottom();
+}
+function finalize(text, lang) {
+  text = (text || '').trim();
+  if (!interimEl && !text) return;
+  if (!interimEl) showInterim('');
+  const seg = cur;
+  if (!text) { seg.ctrl?.abort(); interimEl.remove(); interimEl = null; cur = null; updateMeta(); return; }
+  interimEl.className = 'seg';
+  seg.final = true; seg.text = text; seg.lang = lang || detectLang(text);
+  const p = interimEl.querySelector('p');
+  p.textContent = text;
+  p.insertAdjacentHTML('afterbegin', `<span class="lang-tag">${labelOf(seg.lang)}</span>`);
+  segments.push(seg);
+  interimEl = null; cur = null;
+  if (!isLive()) requestTranslate(seg, true);
+  updateMeta(); scrollBottom();
+}
+
+// ---------- 翻译 ----------
+const LANG_NAME = { zh: 'Chinese', ja: 'Japanese', en: 'English', ko: 'Korean' };
+const LANG_LABEL = { zh: '中', ja: '日', en: 'EN', ko: '한', yue: '粤', other: '?' };
+const labelOf = (c) => LANG_LABEL[c] || (c || '?').toUpperCase();
+
+// 按文字类型粗略判断一句话的主要语言（混合语音按占比多的算）
+function detectLang(text) {
+  const kana = (text.match(/[぀-ヿㇰ-ㇿ]/g) || []).length;
+  const han = (text.match(/[一-鿿㐀-䶿]/g) || []).length;
+  const hangul = (text.match(/[가-힯]/g) || []).length;
+  const words = (text.match(/[A-Za-z]+(?:'[A-Za-z]+)?/g) || []).length;
+  if (hangul > han + kana && hangul >= words) return 'ko';
+  const cjk = kana + han;
+  if (!cjk && !words) return 'other';
+  if (cjk >= words * 1.5) return kana >= 2 || kana > cjk * 0.1 ? 'ja' : 'zh';
+  return 'en';
+}
+
+// 根据翻译模式决定目标语言；返回 null 表示这句不用翻
+function targetFor(mode, lang) {
+  if (mode === 'off') return null;
+  if (mode.includes('<>')) {
+    const [a, b] = mode.split('<>');
+    if (lang === a) return b;
+    if (lang === b) return a;
+    return a; // 第三种语言：译成第一个（通常是中文）
+  }
+  const [, to] = mode.split('>');
+  return lang === to ? null : to;
+}
+
+function trBox(seg, to) {
+  let box = seg.el.querySelector('.tr');
+  if (!box) {
+    box = document.createElement('div');
+    box.className = 'tr pending';
+    box.innerHTML = '<span class="tag"></span><span class="txt"></span>';
+    seg.el.querySelector('.body').appendChild(box);
+  }
+  box.querySelector('.tag').textContent = labelOf(to);
+  return box;
+}
+
+// 请求翻译（节流，避免触发限流）：
+// - 说话过程中：同一句最多每 LIVE_INTERVAL 毫秒翻一次，同时只跑一个请求，最后一次变化一定会补翻
+// - 整句定稿（force）：取消正在跑的请求，立刻用定稿文字翻译
+// - 被限流时：暂停说话中的翻译一会儿；定稿句子自动重试
+const LIVE_INTERVAL = 900;
+let cooldownUntil = 0;
+
+function requestTranslate(seg, force) {
+  clearTimeout(seg.timer);
+  const to = targetFor($('trans').value, seg.final && LANG_NAME[seg.lang] ? seg.lang : detectLang(seg.text));
+  if (!to || !seg.text.trim()) {
+    if (seg.final) { seg.ctrl?.abort(); seg.el.querySelector('.tr')?.remove(); seg.tr = ''; }
+    return;
+  }
+  if (force) {
+    if (seg.busy) seg.ctrl.abort();
+    return runTranslate(seg, to, 0);
+  }
+  if (seg.busy) return; // 跑完后会检查文字有没有变
+  const now = performance.now();
+  const wait = Math.max(cooldownUntil, (seg.lastStart || 0) + LIVE_INTERVAL) - now;
+  if (wait > 0) { seg.timer = setTimeout(() => requestTranslate(seg), wait); return; }
+  runTranslate(seg, to, 0);
+}
+
+async function runTranslate(seg, to, attempt = 0) {
+  const text = seg.text;
+  const ctrl = (seg.ctrl = new AbortController());
+  seg.busy = true;
+  seg.lastStart = performance.now();
+  const box = trBox(seg, to);
+  const txt = box.querySelector('.txt');
+  const shownLen = txt.textContent.length;
+  try {
+    const r = await fetch('/api/translate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: ctrl.signal,
+      body: JSON.stringify({ text, target: LANG_NAME[to], source: 'auto' }),
+    });
+    if (!r.ok) {
+      const err = new Error((await r.json().catch(() => ({}))).error || r.status);
+      err.status = r.status; throw err;
+    }
+    const reader = r.body.getReader(), dec = new TextDecoder();
+    let buf = '';
+    const handle = (line) => {
+      if (!line.trim()) return;
+      const o = JSON.parse(line);
+      if (o.error) throw new Error(o.error);
+      if (o.translation !== undefined) { o.t = o.translation; o.done = true; } // 兼容非流式返回
+      // 重翻时先保留旧译文，新译文追上旧的长度再替换，避免闪烁
+      if (o.done || o.t.length >= shownLen) {
+        seg.tr = o.t; txt.textContent = o.t;
+        box.className = 'tr';
+      }
+    };
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n'); buf = lines.pop();
+      lines.forEach(handle);
+    }
+    handle(buf);
+    scrollBottom();
+  } catch (e) {
+    if (ctrl.signal.aborted) return; // 被新的请求取代了
+    const limited = e.status === 429 || /rate limit/i.test(e.message);
+    if (limited) {
+      cooldownUntil = performance.now() + 1500 * (attempt + 1);
+      if (seg.final && attempt < 4) {
+        if (!seg.tr) { box.className = 'tr pending'; }
+        setTimeout(() => { if (seg.ctrl === ctrl) runTranslate(seg, to, attempt + 1); }, 1000 * 2 ** attempt);
+      }
+      return;
+    }
+    if (seg.final) {
+      box.className = 'tr failed';
+      txt.textContent = '翻译失败，点击重试（' + e.message + '）';
+      box.onclick = () => { box.onclick = null; requestTranslate(seg, true); };
+    }
+  } finally {
+    if (seg.ctrl === ctrl) seg.busy = false;
+  }
+  if (seg.ctrl === ctrl && seg.text !== text) requestTranslate(seg, seg.final);
+}
+
+// ---------- 同声传译 ----------
+let segById = {}, trToSrc = {};
+let playCtx = null, playAt = 0;
+
+// 原文 item → 对应的这一行
+function liveSeg(itemId) {
+  if (segById[itemId]) return segById[itemId];
+  if (cur && !cur.itemId) { cur.itemId = itemId; return (segById[itemId] = cur); }
+  if (cur) finalize(cur.text); // 上一句没收到定稿就开始了新一句
+  cur = newSeg(); interimEl = cur.el; segStart = cur.t; cur.itemId = itemId;
+  updateMeta();
+  return (segById[itemId] = cur);
+}
+// 译文 item → 对应原文那一行（找不到时挂到最近一句还没译完的）
+function liveTrSeg(itemId) {
+  if (trToSrc[itemId]) return trToSrc[itemId];
+  const pending = segments.find((s) => s.itemId && !s.trDone) || cur;
+  if (pending) trToSrc[itemId] = pending;
+  return pending;
+}
+function setLiveTr(seg, text, stash, done) {
+  if (!seg) return;
+  const box = trBox(seg, $('ltTarget').value);
+  const txt = box.querySelector('.txt');
+  txt.textContent = text || '';
+  if (stash) { const s = document.createElement('span'); s.className = 'stash'; s.textContent = stash; txt.appendChild(s); }
+  if (text || stash) box.className = 'tr';
+  seg.tr = (text || '') + (stash || '');
+  if (done) seg.trDone = true;
+  scrollBottom();
+}
+function playPcm24k(b64) {
+  if (!playCtx) return;
+  const bin = atob(b64), n = bin.length >> 1, f = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    let v = bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8);
+    if (v >= 0x8000) v -= 0x10000;
+    f[i] = v / 32768;
+  }
+  const buf = playCtx.createBuffer(1, n, 24000);
+  buf.copyToChannel(f, 0);
+  const src = playCtx.createBufferSource();
+  src.buffer = buf; src.connect(playCtx.destination);
+  playAt = Math.max(playAt, playCtx.currentTime + 0.05);
+  src.start(playAt); playAt += buf.duration;
+}
+function liveHotwords(text) {
+  const phrases = {};
+  for (const line of text.split(/\n/)) {
+    const m = line.split(/\s*(?:=|→|->)\s*/);
+    if (m.length === 2 && m[0] && m[1]) phrases[m[0].trim()] = m[1].trim();
+  }
+  return Object.keys(phrases).length ? { phrases } : null;
+}
+
+// ---------- 偏好保存 ----------
+const PREF_KEY = 'qwen-asr-prefs';
+const PREF_FIELDS = ['source', 'engine', 'lang', 'vad', 'silence', 'trans', 'ltTarget', 'ltAudio', 'corpus'];
+function savePrefs() {
+  const p = {};
+  for (const id of PREF_FIELDS) { const el = $(id); p[id] = el.type === 'checkbox' ? el.checked : el.value; }
+  try { localStorage.setItem(PREF_KEY, JSON.stringify(p)); } catch {}
+}
+function loadPrefs() {
+  let p = {};
+  try { p = JSON.parse(localStorage.getItem(PREF_KEY) || '{}'); } catch {}
+  for (const id of PREF_FIELDS) {
+    if (p[id] === undefined) continue;
+    const el = $(id); if (el.type === 'checkbox') el.checked = p[id]; else el.value = p[id];
+  }
+  $('silence').disabled = !$('vad').checked;
+  if (p.corpus) $('toggleCorpus').click();
+  applyEngineUI();
+}
+const isLive = () => $('engine').value === 'live';
+function applyEngineUI() {
+  document.querySelector('.app').classList.toggle('live', isLive());
+  document.querySelector('.brand p').textContent = isLive()
+    ? 'Qwen3.5-LiveTranslate-Flash-Realtime · 同声传译'
+    : 'Qwen3-ASR-Flash-Realtime + Qwen-MT';
+  $('corpus').placeholder = isLive()
+    ? '可选：热词，每行一个「原文=译文」，例如：\n人工智能=AI\n机器学习=Machine Learning'
+    : '可选：输入领域相关的词汇或背景文本，例如人名、产品名、专业术语，有助于提升识别准确率';
+  $('corpusHint').textContent = isLive()
+    ? '设置在下次开始录音时生效。开启朗读时建议戴耳机，避免外放的译文又被麦克风录进去。'
+    : '设置在下次开始录音时生效';
+}
+
+// ---------- 波形 ----------
+function drawWave() {
+  const c = $('wave'), dpr = devicePixelRatio || 1;
+  const w = c.clientWidth, h = c.clientHeight;
+  if (c.width !== w * dpr) { c.width = w * dpr; c.height = h * dpr; }
+  const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+  const n = levels.length, bw = w / n;
+  const grad = g.createLinearGradient(0, 0, w, 0); grad.addColorStop(0, '#5b4bdb'); grad.addColorStop(1, '#c04bd6');
+  g.fillStyle = recording ? grad : '#d9d5cc';
+  for (let i = 0; i < n; i++) {
+    const v = Math.min(1, levels[i] * 6);
+    const bh = Math.max(3, v * h);
+    const x = i * bw + bw * 0.25, y = (h - bh) / 2, r = Math.min(bw * 0.25, bh / 2);
+    g.beginPath(); g.roundRect(x, y, bw * 0.5, bh, r); g.fill();
+  }
+  requestAnimationFrame(drawWave);
+}
+requestAnimationFrame(drawWave);
+
+// ---------- 处理服务端事件 ----------
+function onServerEvent(ev) {
+  switch (ev.type) {
+    case 'proxy.connected': setStatus('connecting', '正在初始化…'); break;
+    case 'session.created':
+    case 'session.updated': setStatus('live', '识别中'); break;
+    case 'input_audio_buffer.speech_started': setStatus('speaking', '检测到说话'); if ($('source').value !== 'file') $('hintText').textContent = '正在聆听…'; break;
+    case 'input_audio_buffer.speech_stopped': setStatus('live', '识别中'); $('hintText').textContent = '处理中…'; break;
+    // 中间结果：text 为已确定部分，stash 为暂定部分
+    case 'conversation.item.input_audio_transcription.text':
+      if (isLive() && ev.item_id) { if (liveSeg(ev.item_id) !== cur) break; }
+      showInterim(ev.text || '', ev.stash || ''); break;
+    case 'conversation.item.input_audio_transcription.delta':
+      showInterim(((interimEl && interimEl.querySelector('p').textContent) || '') + (ev.delta || '')); break;
+    // 最终结果
+    case 'conversation.item.input_audio_transcription.completed':
+      if (isLive() && ev.item_id && liveSeg(ev.item_id) !== cur) break;
+      finalize(ev.transcript ?? ev.text, ev.language); if (recording && $('source').value !== 'file') $('hintText').textContent = '正在聆听…'; break;
+    // ---- 同传 ----
+    case 'conversation.item.created':
+      if (ev.previous_item_id && segById[ev.previous_item_id] && ev.item?.id) trToSrc[ev.item.id] = segById[ev.previous_item_id];
+      break;
+    case 'response.audio_transcript.text':
+    case 'response.text.text':
+      setLiveTr(liveTrSeg(ev.item_id), ev.text, ev.stash, false); break;
+    case 'response.audio_transcript.delta':
+    case 'response.text.delta': {
+      const sg = liveTrSeg(ev.item_id); setLiveTr(sg, (sg?.tr || '') + (ev.delta || ''), '', false); break;
+    }
+    case 'response.audio_transcript.done':
+    case 'response.text.done':
+      setLiveTr(liveTrSeg(ev.item_id), ev.transcript ?? ev.text ?? '', '', true); break;
+    case 'response.audio.delta':
+      if (ev.delta) playPcm24k(ev.delta); break;
+    case 'response.created': case 'response.done': case 'response.output_item.added': case 'response.output_item.done':
+    case 'response.content_part.added': case 'response.content_part.done': case 'response.audio.done':
+    case 'input_audio_buffer.committed':
+      break;
+    case 'conversation.item.input_audio_transcription.failed':
+      toast('该句识别失败：' + (ev.error?.message || ''), true); finalize(''); break;
+    case 'session.finished': ws && ws.close(); break;
+    case 'error':
+      console.error(ev); toast(ev.error?.message || '服务出错', true); setStatus('error', '出错'); break;
+    default: console.debug('[event]', ev.type, ev);
+  }
+}
+
+// ---------- 开始 / 停止 ----------
+async function start() {
+  $('micBtn').disabled = true;
+  setStatus('connecting', '连接中…');
+  const srcType = $('source').value;
+  let fileBuf = null, fileName = '';
+  try {
+    if (srcType === 'file') {
+      const file = await pickFile(); // 必须在点击事件里同步弹出文件选择框
+      if (!file) { $('micBtn').disabled = false; setStatus('', '未连接'); return; }
+      fileName = file.name;
+      fileBuf = await file.arrayBuffer();
+    } else if (srcType === 'system') {
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        systemAudio: 'include',
+        selfBrowserSurface: 'exclude',
+      });
+      if (!stream.getAudioTracks().length) {
+        stream.getTracks().forEach((t) => t.stop()); stream = null;
+        throw new Error('没有共享到声音：请在弹窗里选择「标签页」，并打开「同时分享标签页中的音频」');
+      }
+      // 在浏览器顶部点「停止共享」时，自动结束
+      stream.getAudioTracks()[0].addEventListener('ended', () => recording && stop());
+    } else {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+    }
+  } catch (e) {
+    const name = { mic: '麦克风', system: '电脑声音', file: '音频文件' }[srcType];
+    toast(`无法使用${name}：` + e.message, true); setStatus('error', name + '不可用'); $('micBtn').disabled = false; return;
+  }
+
+  // 先解码文件，格式不支持时尽早报错
+  audioCtx = new AudioContext();
+  let fileAudio = null;
+  if (fileBuf) {
+    try { fileAudio = await audioCtx.decodeAudioData(fileBuf); }
+    catch { toast('无法解码这个文件，请换成 mp3 / wav / m4a 等常见格式', true); stopAudio(); setStatus('error', '文件无法解码'); $('micBtn').disabled = false; return; }
+  }
+
+  const live = isLive();
+  const model = live ? 'qwen3.5-livetranslate-flash-realtime' : 'qwen3-asr-flash-realtime';
+  segById = {}; trToSrc = {};
+  if (live && $('ltAudio').checked) {
+    try { playCtx && playCtx.close(); } catch {}
+    playCtx = new AudioContext({ sampleRate: 24000 }); playAt = 0; playCtx.resume();
+  } else playCtx = null;
+  ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?model=${model}`);
+  ws.onmessage = (m) => { try { onServerEvent(JSON.parse(m.data)); } catch (e) { console.warn(m.data); } };
+  ws.onclose = () => { if (recording) { toast('连接已断开', true); stopAudio(); } if (!$('status').classList.contains('error')) setStatus('', '未连接'); };
+  ws.onerror = () => { setStatus('error', '连接失败'); };
+  await new Promise((res, rej) => { ws.onopen = res; setTimeout(() => rej(new Error('连接超时')), 8000); })
+    .catch((e) => { toast(e.message, true); });
+  if (ws.readyState !== 1) { stopAudio(); $('micBtn').disabled = false; return; }
+
+  const lang = $('lang').value, vad = $('vad').checked, corpus = $('corpus').value.trim();
+  const turn_detection = vad ? { type: 'server_vad', threshold: 0.2, silence_duration_ms: Number($('silence').value) } : null;
+  if (live) {
+    const transcription = { model: 'qwen3-asr-flash-realtime' };
+    if (lang !== 'auto') transcription.language = lang;
+    const translation = { language: $('ltTarget').value };
+    const hot = corpus && liveHotwords(corpus);
+    if (hot) translation.corpus = hot;
+    send({
+      type: 'session.update',
+      session: {
+        modalities: $('ltAudio').checked ? ['text', 'audio'] : ['text'],
+        voice: 'Tina',
+        input_audio_format: 'pcm',
+        output_audio_format: 'pcm',
+        sample_rate: 16000,
+        input_audio_transcription: transcription,
+        translation,
+        turn_detection,
+      },
+    });
+  } else {
+    const transcription = {};
+    if (lang !== 'auto') transcription.language = lang;
+    if (corpus) transcription.corpus = { text: corpus };
+    send({
+      type: 'session.update',
+      session: {
+        modalities: ['text'],
+        input_audio_format: 'pcm',
+        sample_rate: 16000,
+        input_audio_transcription: transcription,
+        turn_detection,
+      },
+    });
+  }
+
+  await audioCtx.audioWorklet.addModule('pcm-worklet.js');
+  node = new AudioWorkletNode(audioCtx, 'pcm-worklet');
+  if (fileAudio) {
+    // 本地文件：一边播放给你听，一边按实际速度送去识别；播完自动结束
+    source = audioCtx.createBufferSource();
+    source.buffer = fileAudio;
+    source.connect(audioCtx.destination);
+    source.onended = () => setTimeout(() => recording && stop(), 1200);
+    source.start();
+  } else {
+    source = audioCtx.createMediaStreamSource(stream);
+  }
+  node.port.onmessage = ({ data }) => {
+    if (data.level !== undefined) { levels.push(data.level); levels.shift(); }
+    if (data.pcm) send({ type: 'input_audio_buffer.append', audio: toBase64(data.pcm) });
+  };
+  source.connect(node);
+
+  recording = true; startAt = performance.now();
+  timerId = setInterval(() => ($('timer').textContent = fmt(elapsed())), 250);
+  $('micBtn').classList.add('recording'); $('micIcon').innerHTML = ICON_STOP; $('micBtn').disabled = false;
+  $('hintText').textContent = fileName ? `正在识别：${fileName}（${fmt(fileAudio.duration)}）` : '正在聆听…';
+}
+
+function pickFile() {
+  return new Promise((resolve) => {
+    const inp = $('fileInput');
+    inp.value = '';
+    inp.onchange = () => resolve(inp.files[0] || null);
+    inp.oncancel = () => resolve(null);
+    inp.click();
+  });
+}
+
+function stopAudio() {
+  recording = false; clearInterval(timerId);
+  try { source && source.onended !== undefined && (source.onended = null); source && source.stop && source.stop(); } catch {}
+  try { source && source.disconnect(); node && node.disconnect(); } catch {}
+  audioCtx && audioCtx.close(); audioCtx = null;
+  stream && stream.getTracks().forEach((t) => t.stop()); stream = null;
+  levels.fill(0);
+  $('micBtn').classList.remove('recording'); $('micIcon').innerHTML = ICON_MIC;
+  $('hintText').textContent = '准备就绪';
+}
+
+function stop() {
+  stopAudio();
+  if (ws && ws.readyState === 1) {
+    if (!$('vad').checked) send({ type: 'input_audio_buffer.commit' });
+    send({ type: 'session.finish' });
+    $('hintText').textContent = '收尾中…';
+    const s = ws; setTimeout(() => { s.readyState === 1 && s.close(); finalizeLeftover(); }, 4000);
+  }
+}
+function finalizeLeftover() {
+  if (interimEl) { const t = interimEl.querySelector('p').textContent; finalize(t); }
+  $('hintText').textContent = '准备就绪';
+}
+
+function toBase64(buf) {
+  const bytes = new Uint8Array(buf); let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+// ---------- 事件绑定 ----------
+$('micBtn').onclick = () => (recording ? stop() : start());
+document.addEventListener('keydown', (e) => {
+  if (e.code === 'Space' && !['TEXTAREA', 'SELECT', 'INPUT'].includes(document.activeElement.tagName)) { e.preventDefault(); $('micBtn').click(); }
+});
+$('toggleCorpus').onclick = () => {
+  const box = $('corpusBox'); box.classList.toggle('open');
+  $('toggleCorpus').textContent = box.classList.contains('open') ? '－ 收起上下文' : '＋ 专业词汇 / 上下文';
+};
+$('vad').onchange = () => ($('silence').disabled = !$('vad').checked);
+$('engine').addEventListener('change', () => { applyEngineUI(); if (recording) toast('模型切换在下次开始录音时生效'); });
+for (const id of PREF_FIELDS) $(id).addEventListener('change', savePrefs);
+$('trans').addEventListener('change', () => toast('翻译设置已保存，对之后的句子生效'));
+const segText = (s) => s.text + (s.tr ? `\n  → ${s.tr}` : '');
+const allText = () => segments.map((s) => `[${fmt(s.t)}] ${segText(s)}`).join('\n');
+$('copyBtn').onclick = async () => {
+  if (!segments.length) return toast('还没有内容');
+  await navigator.clipboard.writeText(segments.map(segText).join('\n')); toast('已复制到剪贴板');
+};
+$('dlBtn').onclick = () => {
+  if (!segments.length) return toast('还没有内容');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([allText()], { type: 'text/plain;charset=utf-8' }));
+  a.download = `transcript_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.txt`; a.click();
+};
+$('clearBtn').onclick = () => {
+  segments = []; [...$('tbody').querySelectorAll('.seg:not(.interim)')].forEach((e) => e.remove()); updateMeta();
+};
+loadPrefs();
+</script>
+</body>
+</html>
